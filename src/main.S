@@ -112,6 +112,10 @@ rv_csr_mscratch_3 = 0x4B
 stack_base = 0x4C
 rv_x0	= 0x80
 
+.ifndef NUM_INTERRUPTS
+NUM_INTERRUPTS = 5
+.endif
+
 	.area	XSEG	(XDATA)
 	.area	PSEG	(PAG,XDATA)
 	.area	HOME	(ABS,CODE)
@@ -120,19 +124,10 @@ reset:
 	ljmp	init
 
 	.org	0x0003
-	ljmp	isr_eint0
-
-	.org	0x000b
-	ljmp	isr_timer0
-
-	.org	0x0013
-	ljmp	isr_eint1
-
-	.org	0x001b
-	ljmp	isr_timer1
-
-	.org	0x0023
-	ljmp	isr_serial
+	.rept	NUM_INTERRUPTS
+	ljmp	common_isr
+	.ds	5              ; pad 3-byte ljmp out to the 8-byte vector slot
+	.endm
 
 	sjmp	.
 
@@ -3991,23 +3986,7 @@ interrupt_controller:
 	; Not vectored or not asynchronous.
 	ret
 
-isr_eint0:
-	setb	misc_bit0__new_interrupt
-	reti
-
-isr_eint1:
-	setb	misc_bit0__new_interrupt
-	reti
-
-isr_timer0:
-	setb	misc_bit0__new_interrupt
-	reti
-
-isr_timer1:
-	setb	misc_bit0__new_interrupt
-	reti
-
-isr_serial:
+isr_common:
 	setb	misc_bit0__new_interrupt
 	reti
 
