@@ -112,6 +112,10 @@ rv_csr_mscratch_3 = 0x4B
 stack_base = 0x4C
 rv_x0	= 0x80
 
+.ifndef NUM_INTERRUPTS
+NUM_INTERRUPTS = 5
+.endif
+
 	.area	XSEG	(XDATA)
 	.area	PSEG	(PAG,XDATA)
 	.area	HOME	(ABS,CODE)
@@ -120,19 +124,10 @@ reset:
 	ljmp	init
 
 	.org	0x0003
-	ljmp	isr_eint0
-
-	.org	0x000b
-	ljmp	isr_timer0
-
-	.org	0x0013
-	ljmp	isr_eint1
-
-	.org	0x001b
-	ljmp	isr_timer1
-
-	.org	0x0023
-	ljmp	isr_serial
+	.rept	NUM_INTERRUPTS
+	ljmp	isr_common
+	.ds	5              ; pad 3-byte ljmp out to the 8-byte vector slot
+	.endm
 
 	sjmp	.
 
@@ -168,7 +163,7 @@ emu_loop:
 	mov	curr_pc_dptr_1, dph
 
 fetch_instruction:
-	; Fetch instruction
+	; Fetch the first two bytes of the instruction.
 	clr	a
 	movc	a, @a+dptr
 	mov	instruction_0, a
@@ -177,6 +172,15 @@ fetch_instruction:
 	movc	a, @a+dptr
 	mov	instruction_1, a
 	inc	dptr
+
+	; An instruction whose lowest two bits aren't both set is a 16-bit
+	; compressed (RVC) instruction. Decompress it into its equivalent
+	; 32-bit instruction before decoding; otherwise fetch the remaining
+	; two bytes of the full 32-bit instruction.
+	mov	a, instruction_0
+	anl	a, #0x03
+	cjne	a, #0x03, fetch_compressed
+
 	clr	a
 	movc	a, @a+dptr
 	mov	instruction_2, a
@@ -185,7 +189,12 @@ fetch_instruction:
 	movc	a, @a+dptr
 	mov	instruction_3, a
 	inc	dptr
+	sjmp	fetch_decode
 
+fetch_compressed:
+	lcall	decompress_instruction
+
+fetch_decode:
 	; Decode/execute instruction
 	lcall	decode_opcode
 
@@ -3991,25 +4000,89 @@ interrupt_controller:
 	; Not vectored or not asynchronous.
 	ret
 
-isr_eint0:
+isr_common:
 	setb	misc_bit0__new_interrupt
 	reti
 
-isr_eint1:
-	setb	misc_bit0__new_interrupt
-	reti
+decompress_instruction:
+	; Expand a 16-bit compressed (RVC) instruction in instruction_1:0
+	; into its equivalent 32-bit instruction in instruction_3:0, then
+	; return so the normal decoder can execute it.
+	;
+	; Currently only c.addi is implemented:
+	;   op[1:0] = 0b01, funct3 (inst[15:13]) = 0b000
+	;   Expands to: addi rd, rd, sext(imm[5:0]), rd = inst[11:7]
+	;   (rd == 0 is c.nop, which the OP-IMM path treats as a no-op.)
 
-isr_timer0:
-	setb	misc_bit0__new_interrupt
-	reti
+	; Require quadrant 1 (op[1:0] == 0b01).
+	mov	a, instruction_0
+	anl	a, #0x03
+	cjne	a, #0x01, decompress_unimplemented
 
-isr_timer1:
-	setb	misc_bit0__new_interrupt
-	reti
+	; Require funct3 == 0b000 (instruction_1[7:5]).
+	mov	a, instruction_1
+	anl	a, #0xE0
+	jnz	decompress_unimplemented
 
-isr_serial:
-	setb	misc_bit0__new_interrupt
-	reti
+	; Reconstruct rd (== rs1) into immediate_0 as a 5-bit value:
+	;   rd[4:1] = instruction_1[3:0], rd[0] = instruction_0[7].
+	mov	a, instruction_1
+	anl	a, #0x0F
+	rl	a
+	jnb	(((instruction_0 - 0x20) * 8) + 7), 1$
+	inc	a
+1$:
+	mov	immediate_0, a
+
+	; Reconstruct the 6-bit immediate into R4:
+	;   imm[4:0] = instruction_0[6:2], imm[5] = instruction_1[4].
+	mov	a, instruction_0
+	anl	a, #0x7C
+	rr	a
+	rr	a
+	jnb	(((instruction_1 - 0x20) * 8) + 4), 2$
+	orl	a, #0x20
+2$:
+	mov	r4, a
+
+	; instruction_3 = sign-extended imm[11:4].
+	mov	a, r4
+	swap	a
+	anl	a, #0x03
+	jnb	(((instruction_1 - 0x20) * 8) + 4), 3$
+	orl	a, #0xFC
+3$:
+	mov	instruction_3, a
+
+	; instruction_2 = imm[3:0] | rs1[4:1].
+	mov	a, immediate_0
+	rr	a
+	anl	a, #0x0F
+	mov	r5, a
+	mov	a, r4
+	swap	a
+	anl	a, #0xF0
+	orl	a, r5
+	mov	instruction_2, a
+
+	; instruction_1 = rs1[0] | funct3(0b000) | rd[4:1].
+	mov	a, immediate_0
+	rr	a
+	anl	a, #0x8F
+	mov	instruction_1, a
+
+	; instruction_0 = OP-IMM opcode (0x13) | rd[0].
+	mov	a, #0x13
+	jnb	(((immediate_0 - 0x20) * 8) + 0), 4$
+	orl	a, #0x80
+4$:
+	mov	instruction_0, a
+
+	ret
+
+decompress_unimplemented:
+	; Unimplemented compressed instruction.
+	sjmp	.
 
 emulator_size:
 	; The size of the emulator, in bytes, as a little-endian 32-bit
