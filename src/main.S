@@ -115,6 +115,7 @@ rv_x0	= 0x80
 .ifndef NUM_INTERRUPTS
 NUM_INTERRUPTS = 5
 .endif
+interrupt_vector = 0x0003
 
 	.area	XSEG	(XDATA)
 	.area	PSEG	(PAG,XDATA)
@@ -123,10 +124,12 @@ NUM_INTERRUPTS = 5
 reset:
 	ljmp	init
 
-	.org	0x0003
+	.org	interrupt_vector
 	.rept	NUM_INTERRUPTS
-	ljmp	common_isr
-	.ds	5              ; pad 3-byte ljmp out to the 8-byte vector slot
+	setb	misc_bit0__new_interrupt
+	reti
+interrupt_vector = interrupt_vector + 8
+	.org	interrupt_vector
 	.endm
 
 	sjmp	.
@@ -3985,10 +3988,6 @@ interrupt_controller:
 1$:
 	; Not vectored or not asynchronous.
 	ret
-
-isr_common:
-	setb	misc_bit0__new_interrupt
-	reti
 
 emulator_size:
 	; The size of the emulator, in bytes, as a little-endian 32-bit
